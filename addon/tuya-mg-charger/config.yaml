@@ -1,0 +1,34 @@
+name: "Tuya MG Charger MQTT"
+version: "0.1.0"
+slug: "tuya-mg-charger-mqtt"
+description: "Read MG charger data from Tuya Cloud and publish values to MQTT with Home Assistant discovery."
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: services
+boot: auto
+init: false
+url: "https://github.com/9991119990/tuya-mg-charger-addon"
+options:
+  region: eu
+  client_id: ""
+  client_secret: ""
+  device_id: ""
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  interval: 30
+schema:
+  region: list(eu|us|cn|in)
+  client_id: str
+  client_secret: password
+  device_id: str
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_user: str?
+  mqtt_password: password?
+  interval: int(10,3600)

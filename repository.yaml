@@ -1,0 +1,4 @@
+name: "Tuya MG Charger Add-ons Repository"
+url: "https://github.com/9991119990/tuya-mg-charger-addon"
+maintainer: "9991119990"
+description: "Home Assistant add-on for reading Tuya MG charger cloud data and publishing it to MQTT"
