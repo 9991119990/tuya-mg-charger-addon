@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/{arch}-base:3.22
+ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 WORKDIR /app
