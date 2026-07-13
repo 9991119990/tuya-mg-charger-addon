@@ -10,12 +10,14 @@ mqtt_port=$(python3 -c 'import json; print(json.load(open("/data/options.json"))
 mqtt_user=$(python3 -c 'import json; print(json.load(open("/data/options.json"))["mqtt_user"])')
 mqtt_password=$(python3 -c 'import json; print(json.load(open("/data/options.json"))["mqtt_password"])')
 interval=$(python3 -c 'import json; print(json.load(open("/data/options.json"))["interval"])')
+breakers_json=$(python3 -c 'import json; print(json.load(open("/data/options.json")).get("breakers_json", "[]"))')
 
 echo "Starting Tuya MG Charger MQTT bridge"
 echo "Region: ${region}"
 echo "Device ID: ${device_id}"
 echo "MQTT broker: ${mqtt_host}:${mqtt_port}"
 echo "Interval: ${interval}s"
+echo "Breakers JSON: ${breakers_json}"
 
 exec python3 /app/tuya_mg_charger_mqtt.py \
   --region "${region}" \
@@ -26,4 +28,5 @@ exec python3 /app/tuya_mg_charger_mqtt.py \
   --mqtt-port "${mqtt_port}" \
   --mqtt-user "${mqtt_user}" \
   --mqtt-password "${mqtt_password}" \
-  --interval "${interval}"
+  --interval "${interval}" \
+  --breakers-json "${breakers_json}"

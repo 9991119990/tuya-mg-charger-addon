@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import re
 import socket
 import time
 import urllib.parse
@@ -27,6 +28,21 @@ SENSORS = [
 
 BINARY_SENSORS = [
     ("enabled", "Spínač"),
+]
+
+BREAKER_SENSORS = [
+    ("power_w", "Aktuální výkon", "W", "power", "measurement", 1),
+    ("current_a", "Proud", "A", "current", "measurement", 3),
+    ("voltage_v", "Napětí", "V", "voltage", "measurement", 1),
+    ("reported_energy_kwh", "Hlášená energie", "kWh", "energy", "measurement", 3),
+    ("temperature_c", "Teplota", "°C", "temperature", "measurement", 0),
+    ("fault", "Porucha", None, None, None, None),
+    ("relay_status", "Stav relé", None, None, None, None),
+]
+
+BREAKER_BINARY_SENSORS = [
+    ("enabled", "Spínač"),
+    ("child_lock", "Dětský zámek"),
 ]
 
 
@@ -180,6 +196,49 @@ def decode_status(device: dict, status_items: list[dict]) -> dict:
     }
 
 
+def decode_breaker_status(device: dict, status_items: list[dict]) -> dict:
+    status = {item["code"]: item["value"] for item in status_items}
+    enabled = status.get("switch", status.get("switch_1"))
+    return {
+        "enabled": bool(enabled),
+        "power_w": round(status.get("cur_power", 0) / 10, 1),
+        "current_a": round(status.get("cur_current", 0) / 1000, 3),
+        "voltage_v": round(status.get("cur_voltage", 0) / 10, 1),
+        "reported_energy_kwh": round(status.get("add_ele", 0) / 1000, 3),
+        "temperature_c": status.get("temp_value"),
+        "fault": status.get("fault"),
+        "relay_status": status.get("relay_status"),
+        "child_lock": bool(status.get("child_lock", False)),
+        "online": bool(device.get("online") or device.get("is_online")),
+        "raw": status,
+    }
+
+
+def slugify(value: str) -> str:
+    value = value.lower()
+    value = value.replace("ř", "r").replace("č", "c").replace("š", "s").replace("ž", "z")
+    value = value.replace("ý", "y").replace("á", "a").replace("í", "i").replace("é", "e")
+    value = value.replace("ě", "e").replace("ů", "u").replace("ú", "u").replace("ó", "o")
+    value = re.sub(r"[^a-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value or "device"
+
+
+def parse_breakers(value: str) -> list[dict]:
+    value = (value or "").strip()
+    if not value or value == "[]":
+        return []
+    data = json.loads(value)
+    if not isinstance(data, list):
+        raise ValueError("breakers_json must be a JSON list")
+    breakers = []
+    for item in data:
+        if not isinstance(item, dict) or not item.get("id"):
+            raise ValueError("Each breaker entry must contain at least an id")
+        breakers.append({"id": str(item["id"]), "name": str(item.get("name") or item["id"])})
+    return breakers
+
+
 def discovery_config(name, key, state_topic, device, unit=None, device_class=None, state_class=None, precision=None):
     cfg = {
         "name": name,
@@ -213,6 +272,39 @@ def binary_discovery_config(name, key, state_topic, device):
     }
 
 
+def breaker_discovery_config(name, key, state_topic, availability_topic, unique_prefix, device, unit=None, device_class=None, state_class=None, precision=None):
+    cfg = {
+        "name": name,
+        "unique_id": f"{unique_prefix}_{key}",
+        "state_topic": state_topic,
+        "availability_topic": availability_topic,
+        "value_template": "{{ value_json." + key + " }}",
+        "device": device,
+    }
+    if unit:
+        cfg["unit_of_measurement"] = unit
+    if device_class:
+        cfg["device_class"] = device_class
+    if state_class:
+        cfg["state_class"] = state_class
+    if precision is not None:
+        cfg["suggested_display_precision"] = precision
+    return cfg
+
+
+def breaker_binary_discovery_config(name, key, state_topic, availability_topic, unique_prefix, device):
+    return {
+        "name": name,
+        "unique_id": f"{unique_prefix}_{key}",
+        "state_topic": state_topic,
+        "availability_topic": availability_topic,
+        "value_template": "{{ value_json." + key + " | lower }}",
+        "payload_on": "true",
+        "payload_off": "false",
+        "device": device,
+    }
+
+
 def publish_discovery(client: MqttClient, state_topic: str) -> None:
     device = {
         "identifiers": ["tuya_mg_charger"],
@@ -228,6 +320,30 @@ def publish_discovery(client: MqttClient, state_topic: str) -> None:
         client.publish(topic, binary_discovery_config(name, key, state_topic, device), retain=True)
 
 
+def publish_breaker_discovery(client: MqttClient, state_topic: str, availability_topic: str, slug: str, name: str, model: str | None) -> None:
+    unique_prefix = f"tuya_breaker_{slug}"
+    device = {
+        "identifiers": [unique_prefix],
+        "name": name,
+        "manufacturer": "Tuya",
+        "model": model or "Smart breaker",
+    }
+    for key, sensor_name, unit, device_class, state_class, precision in BREAKER_SENSORS:
+        topic = f"homeassistant/sensor/{unique_prefix}/{key}/config"
+        client.publish(
+            topic,
+            breaker_discovery_config(sensor_name, key, state_topic, availability_topic, unique_prefix, device, unit, device_class, state_class, precision),
+            retain=True,
+        )
+    for key, sensor_name in BREAKER_BINARY_SENSORS:
+        topic = f"homeassistant/binary_sensor/{unique_prefix}/{key}/config"
+        client.publish(
+            topic,
+            breaker_binary_discovery_config(sensor_name, key, state_topic, availability_topic, unique_prefix, device),
+            retain=True,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--region", choices=sorted(ENDPOINTS), default="eu")
@@ -239,10 +355,12 @@ def main() -> None:
     parser.add_argument("--mqtt-user", default="")
     parser.add_argument("--mqtt-password", default="")
     parser.add_argument("--interval", type=float, default=30)
+    parser.add_argument("--breakers-json", default="")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
     tuya = TuyaClient(ENDPOINTS[args.region], args.client_id, args.client_secret)
+    breakers = parse_breakers(args.breakers_json)
     state_topic = "tuya_mg_charger/state"
 
     while True:
@@ -260,10 +378,35 @@ def main() -> None:
                 f"energy={data.get('charge_energy_once_kwh')}kWh temp={data.get('temperature_c')}C",
                 flush=True,
             )
+            for breaker in breakers:
+                breaker_device = tuya.get_device(breaker["id"])
+                breaker_name = breaker.get("name") or breaker_device.get("custom_name") or breaker_device.get("name") or breaker["id"]
+                breaker_slug = slugify(breaker_name)
+                breaker_state_topic = f"tuya_breaker/{breaker_slug}/state"
+                breaker_availability_topic = f"tuya_breaker/{breaker_slug}/availability"
+                breaker_data = decode_breaker_status(breaker_device, tuya.get_status(breaker["id"]))
+                publish_breaker_discovery(
+                    mqtt,
+                    breaker_state_topic,
+                    breaker_availability_topic,
+                    breaker_slug,
+                    breaker_name,
+                    breaker_device.get("model") or breaker_device.get("product_name"),
+                )
+                mqtt.publish(breaker_availability_topic, "online", retain=True)
+                mqtt.publish(breaker_state_topic, breaker_data)
+                print(
+                    f"Published breaker {breaker_name}: power={breaker_data.get('power_w')}W "
+                    f"current={breaker_data.get('current_a')}A voltage={breaker_data.get('voltage_v')}V "
+                    f"energy={breaker_data.get('reported_energy_kwh')}kWh temp={breaker_data.get('temperature_c')}C",
+                    flush=True,
+                )
         except Exception as exc:
             print(f"Read/publish failed: {exc}", flush=True)
             if mqtt is not None:
                 mqtt.publish("tuya_mg_charger/availability", "offline", retain=True)
+                for breaker in breakers:
+                    mqtt.publish(f"tuya_breaker/{slugify(breaker.get('name') or breaker['id'])}/availability", "offline", retain=True)
         finally:
             if mqtt is not None:
                 mqtt.close()
