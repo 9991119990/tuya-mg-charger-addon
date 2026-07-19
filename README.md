@@ -1,6 +1,6 @@
 # Tuya MG Charger MQTT Home Assistant Add-on
 
-Reads MG charger data from Tuya Cloud API and publishes it to MQTT using Home Assistant MQTT discovery. It can also read selected Tuya smart breakers/meters.
+Reads MG charger data from Tuya Cloud API and publishes it to MQTT using Home Assistant MQTT discovery. It can also read selected Tuya smart breakers/meters either from Tuya Cloud or directly from the local LAN with tinytuya.
 
 ## Published charger values
 
@@ -40,4 +40,12 @@ Example `breakers_json`:
 [{"id":"bf23117b300ad83b550caa","name":"Solar jistič"},{"id":"bf93ca8fc4e56106e5qrle","name":"EAsun jistič"},{"id":"bfc2b53a7ea8026e88ya9k","name":"Spotřeba EV auto"}]
 ```
 
-The add-on only reads cloud status and publishes sensors. It does not control the charger or breakers.
+For local-only breakers that need protocol 3.5, use `local_devices_json` and leave the Tuya Cloud fields empty if you do not want any cloud calls.
+
+Example `local_devices_json`:
+
+```json
+[{"id":"bfc2b53a7ea8026e88ya9k","name":"Spotřeba EV auto","host":"192.168.68.70","local_key":"YOUR_LOCAL_KEY","version":3.5,"model":"计量断路器"}]
+```
+
+The add-on only reads status and publishes sensors. It does not control the charger or breakers.

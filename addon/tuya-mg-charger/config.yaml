@@ -1,7 +1,7 @@
 name: "Tuya MG Charger MQTT"
-version: "0.1.3"
+version: "0.1.4"
 slug: "tuya-mg-charger-mqtt"
-description: "Read MG charger data from Tuya Cloud and publish values to MQTT with Home Assistant discovery."
+description: "Read Tuya Cloud MG charger data and local Tuya breaker data, then publish values to MQTT with Home Assistant discovery."
 arch:
   - aarch64
   - amd64
@@ -23,6 +23,7 @@ options:
   mqtt_password: ""
   interval: 30
   breakers_json: "[]"
+  local_devices_json: "[]"
 schema:
   region: list(eu|us|cn|in)
   client_id: str
@@ -34,3 +35,4 @@ schema:
   mqtt_password: password?
   interval: int(10,3600)
   breakers_json: str
+  local_devices_json: str

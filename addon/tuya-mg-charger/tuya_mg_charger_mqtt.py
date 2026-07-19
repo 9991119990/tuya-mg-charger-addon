@@ -9,6 +9,11 @@ import time
 import urllib.parse
 import urllib.request
 
+try:
+    import tinytuya
+except ImportError:
+    tinytuya = None
+
 
 ENDPOINTS = {
     "eu": "https://openapi.tuyaeu.com",
@@ -239,6 +244,68 @@ def parse_breakers(value: str) -> list[dict]:
     return breakers
 
 
+def parse_local_devices(value: str) -> list[dict]:
+    value = (value or "").strip()
+    if not value or value == "[]":
+        return []
+    data = json.loads(value)
+    if not isinstance(data, list):
+        raise ValueError("local_devices_json must be a JSON list")
+    devices = []
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError("Each local device entry must be an object")
+        for key in ("id", "name", "host", "local_key"):
+            if not item.get(key):
+                raise ValueError(f"Each local device entry must contain {key}")
+        devices.append({
+            "id": str(item["id"]),
+            "name": str(item["name"]),
+            "host": str(item["host"]),
+            "local_key": str(item["local_key"]),
+            "version": float(item.get("version", 3.5)),
+            "model": str(item.get("model") or "Local Tuya breaker"),
+        })
+    return devices
+
+
+def decode_local_breaker_dps(dps: dict) -> dict:
+    def get(key, default=None):
+        return dps.get(str(key), dps.get(key, default))
+
+    enabled = get(1)
+    return {
+        "enabled": bool(enabled),
+        "power_w": round((get(19, 0) or 0) / 10, 1),
+        "current_a": round((get(18, 0) or 0) / 1000, 3),
+        "voltage_v": round((get(20, 0) or 0) / 10, 1),
+        "reported_energy_kwh": round((get(17, 0) or 0) / 1000, 3),
+        "temperature_c": get(47),
+        "fault": get(26),
+        "relay_status": get(38),
+        "child_lock": bool(get(41, False)),
+        "online": True,
+        "raw": dps,
+    }
+
+
+def read_local_tuya_device(device: dict) -> dict:
+    if tinytuya is None:
+        raise RuntimeError("tinytuya is not installed")
+    tuya_device = tinytuya.OutletDevice(
+        dev_id=device["id"],
+        address=device["host"],
+        local_key=device["local_key"],
+        version=device["version"],
+    )
+    tuya_device.set_socketPersistent(False)
+    tuya_device.set_socketTimeout(10)
+    status = tuya_device.status()
+    if not isinstance(status, dict) or "dps" not in status:
+        raise RuntimeError(f"Local Tuya status error: {status}")
+    return decode_local_breaker_dps(status["dps"])
+
+
 def discovery_config(name, key, state_topic, device, unit=None, device_class=None, state_class=None, precision=None):
     cfg = {
         "name": name,
@@ -347,66 +414,100 @@ def publish_breaker_discovery(client: MqttClient, state_topic: str, availability
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--region", choices=sorted(ENDPOINTS), default="eu")
-    parser.add_argument("--client-id", required=True)
-    parser.add_argument("--client-secret", required=True)
-    parser.add_argument("--device-id", required=True)
+    parser.add_argument("--client-id", default="")
+    parser.add_argument("--client-secret", default="")
+    parser.add_argument("--device-id", default="")
     parser.add_argument("--mqtt-host", required=True)
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--mqtt-user", default="")
     parser.add_argument("--mqtt-password", default="")
     parser.add_argument("--interval", type=float, default=30)
     parser.add_argument("--breakers-json", default="")
+    parser.add_argument("--local-devices-json", default="")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
-    tuya = TuyaClient(ENDPOINTS[args.region], args.client_id, args.client_secret)
+    use_cloud = bool(args.client_id and args.client_secret and args.device_id)
+    tuya = TuyaClient(ENDPOINTS[args.region], args.client_id, args.client_secret) if use_cloud else None
     breakers = parse_breakers(args.breakers_json)
+    local_devices = parse_local_devices(args.local_devices_json)
     state_topic = "tuya_mg_charger/state"
 
     while True:
         mqtt = None
         try:
-            device = tuya.get_device(args.device_id)
-            data = decode_status(device, tuya.get_status(args.device_id))
             mqtt = MqttClient(args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_password)
-            publish_discovery(mqtt, state_topic)
-            mqtt.publish("tuya_mg_charger/availability", "online", retain=True)
-            mqtt.publish(state_topic, data)
-            print(
-                f"Published MG charger: state={data.get('work_state')} "
-                f"power={data.get('power_w')}W current={data.get('charge_current_set_a')}A "
-                f"energy={data.get('charge_energy_once_kwh')}kWh temp={data.get('temperature_c')}C",
-                flush=True,
-            )
-            for breaker in breakers:
-                breaker_device = tuya.get_device(breaker["id"])
-                breaker_name = breaker.get("name") or breaker_device.get("custom_name") or breaker_device.get("name") or breaker["id"]
-                breaker_slug = slugify(breaker_name)
-                breaker_state_topic = f"tuya_breaker/{breaker_slug}/state"
-                breaker_availability_topic = f"tuya_breaker/{breaker_slug}/availability"
-                breaker_data = decode_breaker_status(breaker_device, tuya.get_status(breaker["id"]))
+
+            if use_cloud:
+                try:
+                    device = tuya.get_device(args.device_id)
+                    data = decode_status(device, tuya.get_status(args.device_id))
+                    publish_discovery(mqtt, state_topic)
+                    mqtt.publish("tuya_mg_charger/availability", "online", retain=True)
+                    mqtt.publish(state_topic, data)
+                    print(
+                        f"Published MG charger: state={data.get('work_state')} "
+                        f"power={data.get('power_w')}W current={data.get('charge_current_set_a')}A "
+                        f"energy={data.get('charge_energy_once_kwh')}kWh temp={data.get('temperature_c')}C",
+                        flush=True,
+                    )
+                    for breaker in breakers:
+                        breaker_device = tuya.get_device(breaker["id"])
+                        breaker_name = breaker.get("name") or breaker_device.get("custom_name") or breaker_device.get("name") or breaker["id"]
+                        breaker_slug = slugify(breaker_name)
+                        breaker_state_topic = f"tuya_breaker/{breaker_slug}/state"
+                        breaker_availability_topic = f"tuya_breaker/{breaker_slug}/availability"
+                        breaker_data = decode_breaker_status(breaker_device, tuya.get_status(breaker["id"]))
+                        publish_breaker_discovery(
+                            mqtt,
+                            breaker_state_topic,
+                            breaker_availability_topic,
+                            breaker_slug,
+                            breaker_name,
+                            breaker_device.get("model") or breaker_device.get("product_name"),
+                        )
+                        mqtt.publish(breaker_availability_topic, "online", retain=True)
+                        mqtt.publish(breaker_state_topic, breaker_data)
+                        print(
+                            f"Published breaker {breaker_name}: power={breaker_data.get('power_w')}W "
+                            f"current={breaker_data.get('current_a')}A voltage={breaker_data.get('voltage_v')}V "
+                            f"energy={breaker_data.get('reported_energy_kwh')}kWh temp={breaker_data.get('temperature_c')}C",
+                            flush=True,
+                        )
+                except Exception as exc:
+                    print(f"Cloud read/publish failed: {exc}", flush=True)
+                    mqtt.publish("tuya_mg_charger/availability", "offline", retain=True)
+                    for breaker in breakers:
+                        mqtt.publish(f"tuya_breaker/{slugify(breaker.get('name') or breaker['id'])}/availability", "offline", retain=True)
+
+            for local_device in local_devices:
+                local_name = local_device["name"]
+                local_slug = slugify(local_name)
+                local_state_topic = f"tuya_breaker/{local_slug}/state"
+                local_availability_topic = f"tuya_breaker/{local_slug}/availability"
                 publish_breaker_discovery(
                     mqtt,
-                    breaker_state_topic,
-                    breaker_availability_topic,
-                    breaker_slug,
-                    breaker_name,
-                    breaker_device.get("model") or breaker_device.get("product_name"),
+                    local_state_topic,
+                    local_availability_topic,
+                    local_slug,
+                    local_name,
+                    local_device.get("model"),
                 )
-                mqtt.publish(breaker_availability_topic, "online", retain=True)
-                mqtt.publish(breaker_state_topic, breaker_data)
-                print(
-                    f"Published breaker {breaker_name}: power={breaker_data.get('power_w')}W "
-                    f"current={breaker_data.get('current_a')}A voltage={breaker_data.get('voltage_v')}V "
-                    f"energy={breaker_data.get('reported_energy_kwh')}kWh temp={breaker_data.get('temperature_c')}C",
-                    flush=True,
-                )
+                try:
+                    local_data = read_local_tuya_device(local_device)
+                    mqtt.publish(local_availability_topic, "online", retain=True)
+                    mqtt.publish(local_state_topic, local_data)
+                    print(
+                        f"Published local breaker {local_name}: power={local_data.get('power_w')}W "
+                        f"current={local_data.get('current_a')}A voltage={local_data.get('voltage_v')}V "
+                        f"energy={local_data.get('reported_energy_kwh')}kWh temp={local_data.get('temperature_c')}C",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(f"Local read/publish failed for {local_name}: {exc}", flush=True)
+                    mqtt.publish(local_availability_topic, "offline", retain=True)
         except Exception as exc:
-            print(f"Read/publish failed: {exc}", flush=True)
-            if mqtt is not None:
-                mqtt.publish("tuya_mg_charger/availability", "offline", retain=True)
-                for breaker in breakers:
-                    mqtt.publish(f"tuya_breaker/{slugify(breaker.get('name') or breaker['id'])}/availability", "offline", retain=True)
+            print(f"MQTT connection/publish failed: {exc}", flush=True)
         finally:
             if mqtt is not None:
                 mqtt.close()

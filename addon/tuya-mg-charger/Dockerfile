@@ -1,7 +1,8 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-RUN apk add --no-cache python3
+RUN apk add --no-cache python3 py3-pip
+RUN pip3 install --break-system-packages tinytuya==1.20.0
 
 WORKDIR /app
 COPY tuya_mg_charger_mqtt.py /app/tuya_mg_charger_mqtt.py
